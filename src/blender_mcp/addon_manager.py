@@ -532,6 +532,14 @@ def run_cli(argv: list[str] | None = None) -> int:
     """CLI entry for install-addon / addon-paths. Returns process exit code."""
     import argparse
 
+    # A Windows console on cp1252 can't print the arrows in these messages, and the
+    # install would end in a UnicodeEncodeError after the file was already copied.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     parser = argparse.ArgumentParser(
         prog="mcp-for-blender",
         description="MCP for Blender server and addon installer",
