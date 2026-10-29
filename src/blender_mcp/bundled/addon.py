@@ -954,6 +954,66 @@ def _object_detail(obj):
 
 
 class BlenderMCPServer:
+    class _JsonFrames:
+        """Splits a byte stream of back-to-back JSON objects into messages, scanning each byte once.
+
+        Parsing the whole buffer after every recv() is quadratic in the message size, and two
+        messages arriving in one recv() fail as "Extra data" and then wait forever. UTF-8 never
+        puts an ASCII byte inside a multi-byte character, so scanning bytes for quotes and
+        brackets is safe however a character is split across chunks.
+        """
+
+        _NEXT = re.compile(rb'["\\{}\[\]]')
+        _IN_STRING = re.compile(rb'["\\]')
+
+        def __init__(self):
+            self.buffer = bytearray()
+            self._pos = 0
+            self._depth = 0
+            self._in_string = False
+
+        def feed(self, data):
+            """Add received bytes; return the complete messages (bytes) now available.
+            Raises ValueError when the stream holds something other than JSON objects."""
+            self.buffer += data
+            messages = []
+            buf, i = self.buffer, self._pos
+            while i < len(buf):
+                if self._depth == 0:
+                    while i < len(buf) and buf[i] in b" \t\r\n":
+                        i += 1
+                    if i == len(buf):
+                        break
+                    if buf[i] != 0x7B:  # {
+                        raise ValueError(f"expected a JSON object, got {bytes(buf[i:i + 20])!r}")
+                m = (self._IN_STRING if self._in_string else self._NEXT).search(buf, i)
+                if m is None:
+                    i = len(buf)
+                    break
+                i = m.start()
+                c = buf[i]
+                if self._in_string:
+                    if c == 0x5C:  # backslash: skip the escaped byte
+                        if i + 1 == len(buf):
+                            break  # the escaped byte hasn't arrived; rescan from the backslash
+                        i += 2
+                        continue
+                    self._in_string = False
+                elif c == 0x22:
+                    self._in_string = True
+                elif c in b"{[":
+                    self._depth += 1
+                else:
+                    self._depth -= 1
+                    if self._depth == 0:
+                        messages.append(bytes(buf[:i + 1]).strip())
+                        del buf[:i + 1]
+                        i = 0
+                        continue
+                i += 1
+            self._pos = i
+            return messages
+
     def __init__(self, host='localhost', port=9877):
         self.host = host
         self.port = port
@@ -1221,34 +1281,34 @@ class BlenderMCPServer:
         client.settimeout(1.0)
         with self._clients_lock:
             self._clients.add(client)
-        buffer = b''
+        frames = self._JsonFrames()
 
         try:
             while self.running:
                 # Receive data
                 try:
-                    data = client.recv(8192)
+                    data = client.recv(65536)
                     if not data:
                         print("Client disconnected")
                         break
 
-                    buffer += data
                     try:
-                        # Try to parse command
-                        command = json.loads(buffer.decode('utf-8'))
-                        buffer = b''
-
+                        messages = frames.feed(data)
+                    except ValueError as e:
+                        print(f"Dropping client sending non-JSON: {e}")
+                        break
+                    for raw in messages:
+                        try:
+                            command = json.loads(raw.decode('utf-8'))
+                        except (ValueError, UnicodeDecodeError) as e:
+                            client.sendall(json.dumps(
+                                {"status": "error", "message": f"Not a valid command: {e}"}).encode('utf-8'))
+                            continue
                         # Hand off to the main thread. Never call
                         # bpy.app.timers.register() from here - it is not
                         # thread-safe and the callback can be silently lost.
                         print(f"Queued command: {command.get('type')}")
                         self.command_queue.put((command, client))
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        # Incomplete data, wait for more. A multi-byte UTF-8
-                        # character can land split across a recv() chunk
-                        # boundary, which fails decode() before json.loads()
-                        # ever runs - that's incomplete data too, not garbage.
-                        pass
                 except socket.timeout:
                     # Expected; loop round and re-check self.running.
                     continue

@@ -24,17 +24,6 @@ from contextlib import contextmanager
 from conftest import ROOT_ADDON
 
 
-class _NullEditRecorder:
-    """Stands in for the addon's UserEditRecorder; captures nothing."""
-
-    def drain(self):
-        return []
-
-    @contextmanager
-    def agent_command(self):
-        yield
-
-
 def _load_server_class():
     """Compile BlenderMCPServer from addon.py against stub modules."""
     source = ROOT_ADDON.read_text(encoding="utf-8")
@@ -80,12 +69,8 @@ def _load_server_class():
         "traceback": __import__("traceback"),
         "os": __import__("os"),
         "get_blendermcp_addon_preferences": lambda context=None: None,
+        "re": __import__("re"),
         "RODIN_FREE_TRIAL_KEY": "vibecoding",
-        # start()/stop() drive the edit-capture handlers, which live at module
-        # scope in addon.py and so are not carried in by lifting the class.
-        "_register_edit_capture_handlers": lambda: False,
-        "_unregister_edit_capture_handlers": lambda: None,
-        "get_edit_recorder": lambda: _NullEditRecorder(),
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), "<addon>", "exec"), namespace)
     return namespace["BlenderMCPServer"], registered
