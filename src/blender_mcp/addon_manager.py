@@ -1,7 +1,7 @@
 """
 Bundle, install, and version-check the MCP for Blender addon.
 
-Existing users often update only the MCP server (`uvx mcp-for-blender`). This module:
+Existing users often update only the MCP server (`mcp-for-blender`). This module:
 1. Ships a bundled copy of addon.py inside the package
 2. Can copy it into Blender's user addons directory (`install-addon`)
 3. Handshake with a running addon to detect outdated installs
@@ -74,7 +74,7 @@ class AddonStatusReport:
 
 
 _UPDATE_HINT = (
-    "Run `uvx mcp-for-blender install-addon` to update it, then in Blender: "
+    "Run `mcp-for-blender install-addon` to update it, then in Blender: "
     "Preferences → Add-ons → disable and re-enable 'Interface: MCP for Blender' "
     "(or restart Blender) and click Start MCP Server."
 )
@@ -114,7 +114,7 @@ def check_addon_status_on_startup() -> AddonStatusReport:
                 reason="not_installed",
                 message=(
                     "MCP for Blender addon not found in any Blender addons folder. "
-                    "Run `uvx mcp-for-blender install-addon` to install it."
+                    "Run `mcp-for-blender install-addon` to install it."
                 ),
             )
 
@@ -170,7 +170,6 @@ class AddonHandshake:
     blender_version: str | None
     source: str  # native | missing | error
     warning: str | None = None
-    premium_generators: list[str] = field(default_factory=list)
 
 
 def get_bundled_addon_path() -> Path:
@@ -476,9 +475,9 @@ def handshake_addon(blender_connection) -> AddonHandshake:
             warning = (
                 f"Blender addon protocol {protocol_i!r} is behind "
                 f"expected {EXPECTED_ADDON_PROTOCOL_VERSION}. "
-                "Run `uvx mcp-for-blender install-addon` to update it, then "
+                "Run `mcp-for-blender install-addon` to update it, then "
                 "restart Blender or disable/enable 'Interface: MCP for Blender', "
-                "then Start MCP Server. Trajectory still works via fallbacks."
+                "then Start MCP Server."
             )
         return AddonHandshake(
             up_to_date=up_to_date,
@@ -488,14 +487,13 @@ def handshake_addon(blender_connection) -> AddonHandshake:
             blender_version=info.get("blender_version"),
             source="native",
             warning=warning,
-            premium_generators=list(info.get("premium_generators") or []),
         )
     except Exception as e:
         msg = str(e).lower()
         if "unknown command" in msg or "get_addon_info" in msg:
             warning = (
                 "Blender addon is outdated (no get_addon_info). "
-                "Run `uvx mcp-for-blender install-addon` to update it, then "
+                "Run `mcp-for-blender install-addon` to update it, then "
                 "restart Blender or disable/enable 'Interface: MCP for Blender', "
                 "then Start MCP Server. Fallbacks keep working in the meantime."
             )
@@ -531,7 +529,7 @@ def format_handshake_log(result: AddonHandshake) -> str:
 
 
 def run_cli(argv: list[str] | None = None) -> int:
-    """CLI entry for install-addon / addon-paths / setup / update. Returns process exit code."""
+    """CLI entry for install-addon / addon-paths. Returns process exit code."""
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -572,31 +570,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         help="List discovered Blender user addons directories",
     )
 
-    setup_p = sub.add_parser(
-        "setup",
-        help="Configure your MCP clients and install and enable the Blender addon",
-    )
-    setup_p.add_argument("--dry-run", action="store_true", help="Show what would change without changing anything")
-    setup_p.add_argument("--yes", "-y", action="store_true", help="Configure every client found without asking")
-    setup_p.add_argument("--skip-addon", action="store_true", help="Configure clients only; leave Blender alone")
-
-    update_p = sub.add_parser(
-        "update",
-        help="Update the MCP server and the installed Blender addon to the latest release",
-    )
-    update_p.add_argument("--dry-run", action="store_true", help="Show what would change without changing anything")
-
     args = parser.parse_args(argv)
-
-    if args.command == "update":
-        from .update_cli import run_update
-
-        return run_update(dry_run=args.dry_run)
-
-    if args.command == "setup":
-        from .setup_cli import run_setup
-
-        return run_setup(dry_run=args.dry_run, assume_yes=args.yes, skip_addon=args.skip_addon)
 
     if args.command == "install-addon":
         result = install_addon(

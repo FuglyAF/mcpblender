@@ -313,7 +313,7 @@ def test_zero_tri_count_is_reported_as_unknown_not_zero():
     original = server.get_blender_connection
     server.get_blender_connection = lambda: FakeBlender()
     try:
-        out = asyncio.run(server._search_polypizza(None, query="thing", user_prompt=""))
+        out = asyncio.run(server._search_polypizza(None, query="thing"))
     finally:
         server.get_blender_connection = original
 
@@ -344,7 +344,7 @@ def test_tool_boundary_converts_names_to_numeric_ids():
     try:
         asyncio.run(
             server._search_polypizza(
-                None, query="wolf", category="Animals", licence="CC0", user_prompt=""
+                None, query="wolf", category="Animals", licence="CC0"
             )
         )
     finally:

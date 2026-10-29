@@ -72,7 +72,6 @@ def _install_bpy_stubs(monkeypatch, scene):
 
 def _load_addon(monkeypatch, **scene_attrs):
     monkeypatch.delenv("BLENDERMCP_TRIPO_API_KEY", raising=False)
-    monkeypatch.delenv("BLENDERMCP_PREMIUM_LICENSE_KEY", raising=False)
     scene = types.SimpleNamespace(
         blendermcp_use_tripo=False,
         blendermcp_tripo_model=MODEL,
@@ -145,45 +144,6 @@ def test_tripo_status_reports_sidebar_state(monkeypatch):
     assert "H3.1" in ready["message"]
     assert "P2.0" in ready["message"]
     assert KEY not in str(ready)
-
-
-def _premium(monkeypatch, addon, jobs=None):
-    calls = []
-
-    def premium_request(method, path, payload=None, auth=True):
-        calls.append((method, path, payload))
-        if method == "POST" and path == "/jobs":
-            return {"job_id": "pjob_1"}
-        if path.startswith("/jobs/"):
-            return (jobs or {}).get(path.rsplit("/", 1)[1], {"code": "NOT_FOUND", "message": "No such job"})
-        return {}
-
-    monkeypatch.setattr(addon, "premium_active", lambda: True)
-    monkeypatch.setattr(addon, "premium_request", premium_request)
-    return calls
-
-
-def test_tripo_runs_through_premium_without_a_tripo_key(monkeypatch):
-    addon, _bpy, _scene = _load_addon(monkeypatch, blendermcp_use_tripo=True)
-    calls = _premium(monkeypatch, addon)
-    server = addon.BlenderMCPServer()
-
-    status = server.get_tripo_status()
-    assert status["enabled"] is True
-    assert status["mode"] == "PREMIUM"
-    assert KEY not in str(status)
-
-    reply = server._execute_command_internal({
-        "type": "create_tripo_job",
-        "params": {"text_prompt": "a teapot", "quality": "high"},
-    })
-    assert reply["status"] == "success"
-    assert reply["result"]["request_id"] == "pjob_1"
-    assert calls[-1][:2] == ("POST", "/jobs")
-    assert calls[-1][2]["model"] == "tripo"
-    assert calls[-1][2]["prompt"] == "a teapot"
-    assert calls[-1][2]["quality"] == "high"
-    assert "task_id" not in reply["result"]
 
 
 def test_tripo_text_job_uses_sidebar_model(monkeypatch):

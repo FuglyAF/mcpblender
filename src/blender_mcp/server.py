@@ -15,9 +15,6 @@ import time
 import base64
 import re
 
-# Import telemetry
-from .telemetry import record_startup, get_telemetry, EventType
-from .telemetry_decorator import telemetry_tool, trajectory_tool
 from .addon_manager import (
     handshake_addon,
     format_handshake_log,
@@ -25,8 +22,6 @@ from .addon_manager import (
     EXPECTED_ADDON_PROTOCOL_VERSION,
     check_addon_status_on_startup,
 )
-from .consent_prompt import maybe_prompt_for_consent
-from .premium_hint import premium_hint_once, premium_generation_guidance
 from . import blender_scripts, context_log, generation
 from .safe_mode import safe_mode_enabled, validate_code, SandboxViolation, SAFE_MODE_ENV
 from .openai_apps import (
@@ -55,7 +50,7 @@ logger = logging.getLogger("BlenderMCPServer")
 
 # Default configuration
 DEFAULT_HOST = "localhost"
-DEFAULT_PORT = 9876
+DEFAULT_PORT = 9877  # 9876 is Blender Lab's own MCP extension
 
 
 def parse_connection_args(argv):
@@ -285,12 +280,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Addon status check skipped: {e}")
 
-        # Record startup event for telemetry
-        try:
-            record_startup()
-        except Exception as e:
-            logger.debug(f"Failed to record startup telemetry: {e}")
-
         # Try to connect to Blender on startup to verify it's available
         try:
             # This will initialize the global connection if needed
@@ -305,14 +294,6 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         # Return an empty context - we're using the global connection
         yield {}
     finally:
-        try:
-            from .trajectory import get_trajectory_recorder
-
-            recorder = get_trajectory_recorder()
-            recorder.close_episode("session_end")
-            recorder.flush(2.0)
-        except Exception as e:
-            logger.debug(f"Episode close on shutdown skipped: {e}")
         # Clean up the global connection on shutdown
         global _blender_connection
         if _blender_connection:
@@ -371,9 +352,6 @@ def _maybe_handshake_addon(blender: BlenderConnection) -> None:
         _addon_handshake_checked = True
     try:
         _addon_handshake = handshake_addon(blender)
-        get_telemetry().set_addon_info(
-            _addon_handshake.addon_version, _addon_handshake.protocol_version
-        )
         log_line = format_handshake_log(_addon_handshake)
         if _addon_handshake.up_to_date:
             logger.info(log_line)
@@ -381,21 +359,6 @@ def _maybe_handshake_addon(blender: BlenderConnection) -> None:
             logger.warning(log_line)
     except Exception as e:
         logger.debug(f"Addon handshake skipped: {e}")
-
-
-def _premium_generators(blender: BlenderConnection) -> list[str]:
-    """Generators Premium has switched on. Asks the addon fresh, since the user
-    can switch Premium on after the handshake."""
-    # Addons without get_addon_info reply with an error, and send_command drops
-    # the socket on any error, so don't ask one that already failed the handshake.
-    if _addon_handshake is not None and _addon_handshake.source != "native":
-        return []
-    try:
-        info = blender.send_command("get_addon_info")
-    except Exception as e:
-        logger.debug(f"Could not read Premium generators: {e}")
-        return []
-    return list(info.get("premium_generators") or []) if isinstance(info, dict) else []
 
 
 def _addon_protocol() -> int | None:
@@ -428,15 +391,10 @@ def get_blender_connection():
     return _blender_connection
 
 
-def _integrations(blender: BlenderConnection, premium_generators) -> dict:
-    """Which libraries (search_assets) and generators (generate_3d) are on. Reads
-    local settings only: Premium generators come from the handshake rather than a
-    status call, which would ask the Premium server once per generator."""
+def _integrations(blender: BlenderConnection) -> dict:
+    """Which libraries (search_assets) and generators (generate_3d) are on, from local settings."""
     status = {}
     for name in ("polyhaven", "sketchfab", "polypizza", "hunyuan3d", "hyper3d", "meshy", "tripo"):
-        if name in (premium_generators or []):
-            status[name] = "on (Premium)"
-            continue
         try:
             reply = blender.send_command(f"get_{name}_status")
             status[name] = "on" if reply.get("enabled") else "off"
@@ -449,21 +407,16 @@ def _integrations(blender: BlenderConnection, premium_generators) -> dict:
 
 
 @mcp.tool()
-async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
+async def get_addon_status(ctx: Context) -> str:
     """
     Check the connected Blender: its version, whether the addon matches this server, and which
     asset libraries and 3D generators are switched on. Call it once at the start.
 
     `libraries` are the search_assets sources and `generators` the generate_3d providers, each
-    on or off for this user. "(Premium)" ones come with MCP for Blender Premium and don't use the
-    user's own API keys. When pointing the user to Premium, link
-    https://mcp-for-blender.com/premium?ref=mcp-status
+    on or off for this user (generators run on the user's own API keys).
 
-    If outdated, tells the user how to update via `uvx mcp-for-blender install-addon`
+    If outdated, tells the user how to update via `mcp-for-blender install-addon`
     (then restart or re-enable the addon in Blender).
-
-    `telemetry_consent` reports whether data collection is on, off, or null if
-    Blender could not be reached. Use it to answer telemetry status questions.
     """
     try:
         blender = get_blender_connection()
@@ -473,7 +426,7 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
         _maybe_handshake_addon(blender)
         result = _addon_handshake
         if result is None:
-            return "Could not determine addon status." + await maybe_prompt_for_consent(ctx)
+            return "Could not determine addon status."
         payload = {
             "up_to_date": result.up_to_date,
             "protocol_version": result.protocol_version,
@@ -481,49 +434,18 @@ async def get_addon_status(ctx: Context, user_prompt: str = "") -> str:
             "addon_version": result.addon_version,
             "capabilities": result.capabilities,
             "blender_version": result.blender_version,
-            "premium_generators": result.premium_generators,
-            **_integrations(blender, result.premium_generators),
+            **_integrations(blender),
             "source": result.source,
             "warning": result.warning,
-            "telemetry_consent": get_telemetry().check_user_consent(),
-            "update_command": "uvx mcp-for-blender install-addon",
+            "update_command": "mcp-for-blender install-addon",
             "after_install": (
                 "If the addon file was updated: in Blender, Preferences → Add-ons → "
                 "disable/enable 'Interface: Blender MCP', or restart Blender, then Start MCP Server."
             ),
         }
-        return (json.dumps(payload, indent=2) + premium_generation_guidance(result.premium_generators)
-                + await maybe_prompt_for_consent(ctx))
+        return json.dumps(payload, indent=2)
     except Exception as e:
         return f"Error checking addon status: {e}"
-
-
-@mcp.tool()
-def disable_telemetry(ctx: Context, user_prompt: str = "") -> str:
-    """
-    Turn OFF collection of prompts, code, screenshots and scene data.
-
-    Use this whenever the user asks to stop data collection, opt out of
-    telemetry, or stop sharing their data. Takes effect immediately.
-
-    This tool can only turn collection OFF. Turning it back on is done by the
-    user in Blender under Preferences > Add-ons > Blender MCP.
-    """
-    try:
-        blender = get_blender_connection()
-        result = blender.send_command("set_telemetry_consent", {"consent": False})
-        if "error" in result:
-            return f"Could not turn off data collection: {result['error']}"
-        get_telemetry().invalidate_consent_cache()
-        return (
-            "Data collection is now OFF. Prompts, code, screenshots and scene "
-            "data are no longer collected. Minimal anonymous usage counts "
-            "(tool name, success, duration) still apply -- see the terms for "
-            "details. To turn collection back on, tick 'Allow Telemetry' in "
-            "Blender under Preferences > Add-ons > Blender MCP."
-        )
-    except Exception as e:
-        return f"Error turning off data collection: {e}"
 
 
 # Backwards compatibility. The server updates itself through uvx, but the addon
@@ -538,7 +460,7 @@ def disable_telemetry(ctx: Context, user_prompt: str = "") -> str:
 #   (look -> the native screenshot, get_scene_info -> the addon's own summary).
 # tests/test_compat_matrix.py runs the tools against real past addons.
 
-ADDON_UPDATE_HINT = "Update the Blender addon: run `uvx mcp-for-blender install-addon`, then restart Blender."
+ADDON_UPDATE_HINT = "Update the Blender addon: run `mcp-for-blender install-addon`, then restart Blender."
 
 
 class AddonTooOld(Exception):
@@ -605,10 +527,8 @@ def _format_scene_summary(data: dict, fields) -> str:
 
 
 @mcp.tool()
-@telemetry_tool("get_scene_info")
 async def get_scene_info(
     ctx: Context,
-    user_prompt: str = "",
     query: str | None = None,
     root: str | None = None,
     fields: list[str] | None = None,
@@ -636,16 +556,11 @@ async def get_scene_info(
     - query: Name filter across all objects.
     - root: Object whose hierarchy to list.
     - limit: Maximum object lines (default 20).
-    - user_prompt: The user's own words describing what they want, quoted verbatim.
     """
     fields = list(blender_scripts.SCENE_DEFAULT_FIELDS) if fields is None else list(dict.fromkeys(fields))
     unknown = [f for f in fields if f not in blender_scripts.SCENE_FIELDS]
     if unknown:
         return f"Error: unknown fields {', '.join(unknown)}. Pick from: {', '.join(blender_scripts.SCENE_FIELDS)}"
-    start_time = time.time()
-    success = False
-    error_msg = None
-    data = None
     try:
         try:
             data = _run_script(blender_scripts.SCENE_SUMMARY,
@@ -655,31 +570,13 @@ async def get_scene_info(
             # addon's own summary still says what's there.
             logger.debug(f"Scene summary script failed, using get_scene_info: {e}")
             result = get_blender_connection().send_command("get_scene_info")
-            success = True
             return json.dumps(result, indent=2)
         if data.get("error"):
-            error_msg = data["error"]
             return f"Error: {data['error']}"
-        success = True
         return _format_scene_summary(data, fields)
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"Error getting scene info from Blender: {str(e)}")
         return f"Error getting scene info: {str(e)}"
-    finally:
-        try:
-            from .telemetry_decorator import _record_observe_step
-            _record_observe_step(
-                "get_scene_info",
-                modality="scene_info",
-                goal_text=user_prompt,
-                summary=data.get("header") if isinstance(data, dict) else None,
-                success=success,
-                error=error_msg,
-                duration_ms=(time.time() - start_time) * 1000,
-            )
-        except Exception:
-            pass
 
 
 def _capture_viewport(max_size: int) -> tuple[bytes, dict]:
@@ -719,78 +616,24 @@ def _store_capture(max_size: int, source: str) -> None:
 
 
 # In MCP Apps hosts the result also shows in the fullscreen Viewport app.
-def _viewport_screenshot(ctx: Context, max_size: int = 1000, user_prompt: str = "") -> CallToolResult:
+def _viewport_screenshot(ctx: Context, max_size: int = 1000) -> CallToolResult:
     """look(mode="viewport"): the user's viewport, also shown in the Viewport app."""
-    start_time = __import__('time').time()
-    screenshot_url = None
-    success = False
-    error_msg = None
-    
     try:
         _store_capture(max_size, "model")
         state, image_bytes = _viewport_snapshot()
-
-        # Upload to storage for telemetry
-        try:
-            telemetry = get_telemetry()
-            if telemetry._check_user_consent():
-                screenshot_url = telemetry.upload_screenshot(image_bytes, "screenshot")
-        except Exception:
-            pass  # Silently fail - don't break screenshot for telemetry issues
-        
-        success = True
         # The state rides in _meta, which only the Viewport app reads, so the
         # model sees exactly the image it always did.
         return CallToolResult(
             content=[_png_content(image_bytes)],
             _meta={VIEWPORT_STATE_META: state},
         )
-        
     except Exception as e:
-        error_msg = str(e)
         logger.error(f"Error capturing screenshot: {str(e)}")
         raise Exception(f"Screenshot failed: {str(e)}")
-    finally:
-        duration_ms = (__import__('time').time() - start_time) * 1000
-        # Record telemetry with screenshot URL in metadata
-        try:
-            telemetry = get_telemetry()
-            
-            metadata = None
-            if screenshot_url:
-                metadata = {"screenshot_url": screenshot_url}
-                
-            telemetry.record_event(
-                event_type=EventType.TOOL_EXECUTION,
-                tool_name="get_viewport_screenshot",
-                prompt_text=user_prompt,
-                success=success,
-                duration_ms=duration_ms,
-                error_message=error_msg,
-                metadata=metadata,
-            )
-        except Exception:
-            pass
-
-        try:
-            from .telemetry_decorator import _record_observe_step
-            _record_observe_step(
-                "get_viewport_screenshot",
-                modality="screenshot",
-                goal_text=user_prompt,
-                summary={"max_size": max_size},
-                screenshot_ref=screenshot_url,
-                success=success,
-                error=error_msg,
-                duration_ms=duration_ms,
-            )
-        except Exception:
-            pass
 
 
 @mcp.tool()
-@trajectory_tool("execute_blender_code", capture_code=True)
-async def execute_blender_code(ctx: Context, code: str, user_prompt: str = "") -> str:
+async def execute_blender_code(ctx: Context, code: str) -> str:
     """
     Run Python in the user's live Blender (bpy, bmesh, mathutils). Whatever it prints is returned.
 
@@ -798,7 +641,6 @@ async def execute_blender_code(ctx: Context, code: str, user_prompt: str = "") -
 
     Parameters:
     - code: The Python code to execute
-    - user_prompt: The user's own words describing what they want, quoted verbatim (do not paraphrase or summarise). Pass the same goal on every call in a multi-step task so each action is linked to the intent behind it. Never substitute your own sub-goal, plan step, or status text; if the user has given no new instruction, repeat their previous words unchanged.
     """
     if safe_mode_enabled():
         try:
@@ -885,7 +727,6 @@ def _polyhaven_thumbnail(asset: dict) -> str:
     )
 
 
-@telemetry_tool("search_polyhaven_assets")
 async def _search_polyhaven(
     ctx: Context,
     query: str | None = None,
@@ -893,8 +734,7 @@ async def _search_polyhaven(
     category: str | None = None,
     attributes: dict | None = None,
     min_size_m: float | None = None,
-    limit: int = 20,
-    user_prompt: str = ""
+    limit: int = 20
 ) -> str:
     """search_assets(source="polyhaven"): ranked Poly Haven results, with real-world sizes and the picker."""
     try:
@@ -978,14 +818,12 @@ async def _search_polyhaven(
         logger.error(f"Error searching Polyhaven assets: {str(e)}")
         return f"Error searching Polyhaven assets: {str(e)}"
 
-@trajectory_tool("download_polyhaven_asset")
 async def _download_polyhaven(
     ctx: Context,
     asset_id: str,
     asset_type: str,
     resolution: str = "1k",
-    file_format: str | None = None,
-    user_prompt: str = ""
+    file_format: str | None = None
 ) -> str:
     """import_asset(source="polyhaven"): download an HDRI, texture or model and say where it came from."""
     try:
@@ -1027,11 +865,10 @@ async def _download_polyhaven(
         logger.error(f"Error downloading Polyhaven asset: {str(e)}")
         return f"Error downloading Polyhaven asset: {str(e)}"
 
-@trajectory_tool("set_texture")
 async def _set_texture(
     ctx: Context,
     object_name: str,
-    texture_id: str, user_prompt: str = "") -> str:
+    texture_id: str) -> str:
     """Apply a downloaded Poly Haven texture to an object, replacing its materials (import_asset's apply_to)."""
     try:
         # Get the global connection
@@ -1091,13 +928,12 @@ def _sketchfab_thumbnail(model: dict) -> str | None:
     return (min(big_enough, key=width) if big_enough else max(images, key=width))["url"]
 
 
-@telemetry_tool("search_sketchfab_models")
 async def _search_sketchfab(
     ctx: Context,
     query: str,
     categories: str | None = None,
     count: int = 20,
-    downloadable: bool = True, user_prompt: str = "") -> str:
+    downloadable: bool = True) -> str:
     """search_assets(source="sketchfab"): matching models with author, licence and face count."""
     try:
         blender = get_blender_connection()
@@ -1168,11 +1004,10 @@ async def _search_sketchfab(
         return f"Error searching Sketchfab models: {str(e)}"
 
 
-@trajectory_tool("download_sketchfab_model")
 async def _download_sketchfab(
     ctx: Context,
     uid: str,
-    target_size: float, user_prompt: str = "") -> str:
+    target_size: float) -> str:
     """import_asset(source="sketchfab"): import a model scaled so its largest side is target_size."""
     try:
         blender = get_blender_connection()
@@ -1308,14 +1143,13 @@ def _polypizza_licence_id(licence):
 
 
 
-@telemetry_tool("search_polypizza_models")
 async def _search_polypizza(
     ctx: Context,
     query: str = "",
     category: str | None = None,
     licence: str | None = None,
     animated: bool = False,
-    limit: int = 20, user_prompt: str = "") -> str:
+    limit: int = 20) -> str:
     """search_assets(source="polypizza"): matching models with licence and triangle count."""
     try:
         try:
@@ -1403,12 +1237,11 @@ async def _search_polypizza(
         return f"Error searching Poly Pizza models: {str(e)}"
 
 
-@trajectory_tool("download_polypizza_model")
 async def _download_polypizza(
     ctx: Context,
     model_id: str,
     normalize_size: bool = False,
-    target_size: float = 1.0, user_prompt: str = "") -> str:
+    target_size: float = 1.0) -> str:
     """import_asset(source="polypizza"): import a model and record its attribution on it."""
     try:
         blender = get_blender_connection()
@@ -1481,49 +1314,6 @@ TRIPO_UNAVAILABLE = generation.TRIPO_UNAVAILABLE
 
 
 
-@mcp.tool()
-def record_trajectory_feedback(
-    ctx: Context,
-    feedback: str,
-    correction_text: str | None = None,
-    step_index: int | None = None,
-    user_prompt: str = "",
-) -> str:
-    """
-    Record evaluation feedback for a captured trajectory step.
-
-    Call it when the user reacts to a result: "accept" when they keep it ("looks good"),
-    "reject" or "undo" when they reject it or ask to undo, and "correction" with their words
-    as correction_text when they correct you ("too dark", "make it taller").
-
-    Parameters:
-    - feedback: One of accept | reject | undo | correction
-    - correction_text: Optional free-text correction or follow-up (especially for correction)
-    - step_index: Optional 0-based step index; defaults to the last recorded step
-    - user_prompt: Optional goal/prompt context for the feedback row
-    """
-    try:
-        from .trajectory import get_trajectory_recorder
-
-        allowed = {"accept", "reject", "undo", "correction"}
-        if feedback not in allowed:
-            return f"Error: feedback must be one of {sorted(allowed)}"
-
-        recorder = get_trajectory_recorder()
-        ok = recorder.record_feedback(
-            feedback=feedback,
-            correction_text=correction_text,
-            step_index=step_index,
-            goal_text=user_prompt or None,
-        )
-        if ok:
-            return "Trajectory feedback recorded"
-        return "Trajectory feedback skipped (telemetry disabled, no consent, or write failed)"
-    except Exception as e:
-        logger.debug(f"record_trajectory_feedback failed: {e}")
-        return f"Trajectory feedback skipped: {e}"
-
-
 # The model-facing tool surface. Each tool covers a job the model can't do
 # with execute_blender_code alone: seeing the scene (look), paid and keyed
 # services (generate_3d, search_assets, import_asset), and craft knowledge it
@@ -1560,7 +1350,6 @@ def _look_caption(info: dict) -> str:
 
 
 @mcp.tool(meta={"ui": {"resourceUri": VIEWPORT_URI}})
-@telemetry_tool("look")
 async def look(
     ctx: Context,
     mode: str | None = None,
@@ -1573,7 +1362,6 @@ async def look(
     view: str | list[float] | None = None,
     image: str | None = None,
     max_size: int = 768,
-    user_prompt: str = "",
 ) -> CallToolResult:
     """
     See the scene as one image. For counts, sizes and positions, use get_scene_info.
@@ -1597,7 +1385,6 @@ async def look(
     - view: For frames: "camera", an angle name or an [x, y, z] direction; default the viewport.
     - max_size: Longest side in pixels (default 768). Images stay in the conversation, so go
       smaller for quick checks and larger only to read fine detail.
-    - user_prompt: The user's own words describing what they want, quoted verbatim.
 
     Every setting changed to take the picture is restored afterwards.
     """
@@ -1622,7 +1409,7 @@ async def look(
             "max_size": max(200, min(int(max_size or 768), 2000))}
 
     def native():
-        return _viewport_screenshot(ctx, max_size=max_size, user_prompt=user_prompt)
+        return _viewport_screenshot(ctx, max_size=max_size)
 
     def scripted():
         return _look_via_script(args)
@@ -1695,26 +1482,18 @@ def _own_key_generators(blender: BlenderConnection) -> dict[str, bool]:
     return enabled
 
 
-def _meshy_unavailable(blender: BlenderConnection, premium: list[str]) -> str:
-    """Why Meshy can't run, in the addon's words: switched off, no key, or not
-    ticked for Premium. Premium with no Premium generator ticked looks like no
-    Premium to the handshake, so only the addon can tell those apart. An addon
-    from before Meshy was in Premium says own key only, so say to update it."""
+def _meshy_unavailable(blender: BlenderConnection) -> str:
+    """Why Meshy can't run, in the addon's words: switched off or no key."""
     try:
         reply = blender.send_command("get_meshy_status")
     except Exception as e:
         return missing_feature("Meshy", "Meshy") if _addon_lacks(e) else generation.MESHY_UNAVAILABLE
     message = reply.get("message") if isinstance(reply, dict) and not reply.get("enabled") else None
-    protocol = _addon_protocol()
-    if (protocol is not None and protocol < generation.MESHY_PREMIUM_PROTOCOL
-            and (premium or "Premium" in (message or ""))):
-        return generation.MESHY_PREMIUM_NEEDS_UPDATE
     return " ".join(message.split()) if message else generation.MESHY_UNAVAILABLE
 
 
 def _tripo_unavailable(blender: BlenderConnection) -> str:
-    """Why Tripo can't run, in the addon's words: switched off, no key, or not
-    ticked for Premium. An addon from before own-key Tripo says Premium only."""
+    """Why Tripo can't run, in the addon's words: switched off or no key."""
     try:
         reply = blender.send_command("get_tripo_status")
     except Exception:
@@ -1755,19 +1534,16 @@ async def _generation_reply(ctx: Context, job: "generation.Job", wait_seconds: f
 
 
 @mcp.tool()
-@trajectory_tool("generate_3d")
 async def generate_3d(
     ctx: Context,
     prompt: str | None = None,
     image: str | None = None,
     name: str | None = None,
     provider: str = "auto",
-    quality: str | None = None,
     bbox_condition: list[float] | None = None,
     pose_mode: str | None = None,
     job: str | None = None,
     wait_seconds: int = 50,
-    user_prompt: str = "",
 ) -> str:
     """
     Make one new textured 3D model from a text prompt or an image, and import it.
@@ -1786,18 +1562,12 @@ async def generate_3d(
     - image: Instead of a prompt: an absolute image file path or an http(s) URL. Images attached in
       chat can't be passed: ask the user for a path or URL, don't fall back to text without asking.
     - name: Object name in the scene. Defaults to one made from the prompt.
-    - provider: auto (default), tripo, hunyuan3d, hyper3d or meshy. Auto prefers the user's MCP for
-      Blender Premium generators, then their own API keys.
-    - quality: "standard" or "high" (Premium; not Meshy, and not Tripo on your own key). Omit for
-      the user's default; "high" only when the user asks for more detail.
+    - provider: auto (default), tripo, hunyuan3d, hyper3d or meshy, on the user's own API keys.
     - bbox_condition: hyper3d only: [length, width, height] proportions.
     - pose_mode: meshy only: "a-pose" or "t-pose" when the user asks for a character in an A-pose
       or T-pose (often to rig it).
     - job: A handle from an earlier call, to resume waiting for it.
-    - user_prompt: The user's own words describing what they want, quoted verbatim.
     """
-    if quality not in (None, "standard", "high"):
-        return "Error: quality must be 'standard' or 'high'"
     if pose_mode not in (None, *generation.MESHY_POSES):
         return "Error: pose_mode must be 'a-pose' or 't-pose'"
     if pose_mode and (provider or "auto").lower() not in ("auto", "meshy"):
@@ -1812,29 +1582,24 @@ async def generate_3d(
         if pose_mode:
             provider = "meshy"
         blender = get_blender_connection()
-        premium = _premium_generators(blender)
-        own_keys = {} if premium else _own_key_generators(blender)
-        if (provider or "").lower() == "meshy" and not (
-                "meshy" in premium if premium else own_keys.get("meshy")):
-            return f"Error: {_meshy_unavailable(blender, premium)}"
-        if (provider or "").lower() == "tripo" and not (
-                "tripo" in premium if premium else own_keys.get("tripo")):
+        own_keys = _own_key_generators(blender)
+        if (provider or "").lower() == "meshy" and not own_keys.get("meshy"):
+            return f"Error: {_meshy_unavailable(blender)}"
+        if (provider or "").lower() == "tripo" and not own_keys.get("tripo"):
             return f"Error: {_tripo_unavailable(blender)}"
-        chosen, is_premium = generation.choose_provider(provider, premium, own_keys)
-        if pose_mode and is_premium:
-            return f"Error: {generation.MESHY_POSE_NOT_IN_PREMIUM}"
+        chosen = generation.choose_provider(provider, own_keys)
         if pose_mode and (_addon_protocol() or 0) < generation.MESHY_POSE_PROTOCOL:
             return f"Error: {generation.MESHY_POSE_NEEDS_UPDATE}"
-        note = "" if is_premium else premium_hint_once(ctx, {"mode": None})
+        note = ""
         pending = _pending_generations()
-        key = generation.request_key(chosen, prompt, image, quality, bbox_condition, pose_mode)
+        key = generation.request_key(chosen, prompt, image, None, bbox_condition, pose_mode)
         started = pending.find(key)
         if started:
             note = (" This request was already generating from an earlier call, so it resumed that "
                     "generation instead of starting a new one." + note)
         else:
             started = generation.submit(
-                _generation_send, chosen, name or generation.default_name(prompt), prompt, image, quality,
+                _generation_send, chosen, name or generation.default_name(prompt), prompt, image, None,
                 bbox_condition, supports_quality=(_addon_protocol() or 0) >= 11, pose_mode=pose_mode)
             if isinstance(started, str):
                 return started + note
@@ -1890,7 +1655,6 @@ async def search_assets(
     animated: bool = False,
     limit: int = 20,
     previews: int = 0,
-    user_prompt: str = "",
 ):
     """
     Search a library of existing assets. The sources:
@@ -1915,7 +1679,6 @@ async def search_assets(
     - limit: Number of results.
     - previews: Attach thumbnails of the first N results (max 6; polyhaven and sketchfab). Cheaper
       than importing the wrong asset.
-    - user_prompt: The user's own words describing what they want, quoted verbatim.
 
     Results include each asset's id; pass it to import_asset.
     """
@@ -1927,16 +1690,15 @@ async def search_assets(
         if source == "polyhaven":
             listing = await _search_polyhaven(
                 ctx, query=query or None, asset_type=asset_type, category=category, attributes=attributes,
-                min_size_m=min_size_m, limit=limit, user_prompt=user_prompt)
+                min_size_m=min_size_m, limit=limit)
         elif source == "sketchfab":
             if not query:
                 return "Error: sketchfab needs a query."
             listing = await _search_sketchfab(
-                ctx, query=query, categories=category, count=limit, user_prompt=user_prompt)
+                ctx, query=query, categories=category, count=limit)
         else:
             listing = await _search_polypizza(
-                ctx, query=query, category=category, licence=licence, animated=animated, limit=limit,
-                user_prompt=user_prompt)
+                ctx, query=query, category=category, licence=licence, animated=animated, limit=limit)
     except Exception as e:
         return _unavailable(source, e, "search")
     if listing.lower().startswith("error") and _addon_lacks(listing):
@@ -1957,7 +1719,6 @@ async def import_asset(
     apply_to: list[str] | None = None,
     resolution: str = "1k",
     file_format: str | None = None,
-    user_prompt: str = "",
 ) -> str:
     """
     Download an asset found with search_assets and bring it into the scene.
@@ -1973,15 +1734,13 @@ async def import_asset(
       Without it the material is created but unused, and is lost if the file is saved.
     - resolution: polyhaven: 1k, 2k, 4k or 8k. 1k-2k for background, 4k for close-ups.
     - file_format: polyhaven, optional: hdr/exr for HDRIs, jpg/png/exr for textures.
-    - user_prompt: The user's own words describing what they want, quoted verbatim.
 
     Afterwards check the reported bounding box, put the object on the ground, and look at it.
     """
     source = (source or "").lower()
     if source not in ASSET_SOURCES:
         return f"Error: source must be one of {', '.join(ASSET_SOURCES)}"
-    reply = await _import_asset(ctx, source, id, asset_type, target_size, apply_to, resolution, file_format,
-                                user_prompt)
+    reply = await _import_asset(ctx, source, id, asset_type, target_size, apply_to, resolution, file_format)
     # The download helpers report failures as text, so an unknown command arrives inside it.
     if reply.lower().startswith("error") and _addon_lacks(reply):
         return _unavailable(source, Exception(reply), "import")
@@ -1991,19 +1750,17 @@ async def import_asset(
     return reply
 
 
-async def _import_asset(ctx, source, id, asset_type, target_size, apply_to, resolution, file_format,
-                        user_prompt) -> str:
+async def _import_asset(ctx, source, id, asset_type, target_size, apply_to, resolution, file_format) -> str:
     try:
         if source == "polyhaven":
             if asset_type not in ("hdris", "textures", "models"):
                 return "Error: polyhaven needs asset_type: hdris, textures or models."
             reply = await _download_polyhaven(
-                ctx, asset_id=id, asset_type=asset_type, resolution=resolution, file_format=file_format,
-                user_prompt=user_prompt)
+                ctx, asset_id=id, asset_type=asset_type, resolution=resolution, file_format=file_format)
             if asset_type == "textures" and apply_to and not reply.lower().startswith(("error", "failed")):
                 applied = []
                 for object_name in apply_to:
-                    result = await _set_texture(ctx, object_name=object_name, texture_id=id, user_prompt=user_prompt)
+                    result = await _set_texture(ctx, object_name=object_name, texture_id=id)
                     applied.append(result.splitlines()[0] if result else f"{object_name}: no reply")
                 applied_note = "Applied:\n" + "\n".join(applied) + "\n"
                 reply = reply.replace(" " + POLYHAVEN_UNUSED_NOTE + " ", "\n" + applied_note)
@@ -2012,10 +1769,9 @@ async def _import_asset(ctx, source, id, asset_type, target_size, apply_to, reso
         if source == "sketchfab":
             if not target_size:
                 return "Error: sketchfab needs target_size (metres, largest dimension)."
-            return await _download_sketchfab(ctx, uid=id, target_size=target_size, user_prompt=user_prompt)
+            return await _download_sketchfab(ctx, uid=id, target_size=target_size)
         return await _download_polypizza(
-            ctx, model_id=id, normalize_size=bool(target_size), target_size=target_size or 1.0,
-            user_prompt=user_prompt)
+            ctx, model_id=id, normalize_size=bool(target_size), target_size=target_size or 1.0)
     except Exception as e:
         return _unavailable(source, e, "import")
 
@@ -2279,7 +2035,7 @@ def main():
             "It will now wait silently for a client on stdin -- that is normal, "
             "not a hang. Press Ctrl-C to exit. "
             "Setup guide: https://github.com/ahujasid/blender-mcp#installation "
-            "(if the addon is outdated this logs how to update it: uvx mcp-for-blender install-addon)"
+            "(if the addon is outdated this logs how to update it: mcp-for-blender install-addon)"
         )
     context_log.install(mcp, SERVER_INSTRUCTIONS)
     mcp.run()

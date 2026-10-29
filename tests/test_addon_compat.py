@@ -17,13 +17,11 @@ class FakeBlender:
         self.error = error
 
     def send_command(self, command, params=None, read_only=False):
-        if command == "get_telemetry_consent":
-            return {"consent": False}
         self.sent.append((command, params))
         if self.error:
             raise Exception(f"Communication error with Blender: {self.error}")
         return {
-            "get_addon_info": {"premium_generators": []},
+            "get_addon_info": {},
             "get_hunyuan3d_status": {"enabled": True},
             "get_hyper3d_status": {"enabled": False},
             "create_hunyuan_job": {"Response": {"JobId": "a"}},
@@ -41,13 +39,13 @@ def _connect(monkeypatch, protocol, error=None):
     return blender
 
 
-@pytest.mark.parametrize("protocol, sends_quality", [(None, False), (9, False), (10, False), (11, True)])
-def test_hunyuan_quality_reaches_only_addons_that_accept_it(monkeypatch, protocol, sends_quality):
+@pytest.mark.parametrize("protocol", [None, 9, 10, 11])
+def test_hunyuan_never_gets_a_quality_on_the_users_own_key(monkeypatch, protocol):
     blender = _connect(monkeypatch, protocol)
-    out = asyncio.run(server.generate_3d(None, prompt="stool", provider="hunyuan3d", quality="high"))
+    out = asyncio.run(server.generate_3d(None, prompt="stool", provider="hunyuan3d"))
     assert out.startswith("Generated and imported 'Stool' with hunyuan3d"), out
     create = next(params for command, params in blender.sent if command == "create_hunyuan_job")
-    assert ("quality" in create) is sends_quality
+    assert "quality" not in create
 
 
 @pytest.mark.parametrize("kwargs", [

@@ -210,7 +210,7 @@ VIEWPORT_TITLE = "Blender Viewport"
 # model's sight (structuredContent would reach the model too).
 VIEWPORT_STATE_META = "mcp-for-blender/viewport"
 
-# The mcp-for-blender.com favicon cube, monochrome in currentColor so the
+# The upstream project's favicon cube, monochrome in currentColor so the
 # host can theme it, on the 20px viewbox the entrypoint icon guidelines ask for.
 _VIEWPORT_ICON_SVG = (
     '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 20 20" fill="currentColor">'

@@ -1,7 +1,7 @@
 """generate_3d drives every provider through one submit/poll/import flow.
 
 A fake addon replays each provider's real reply shapes, so these pin the
-shapes the flow depends on: Premium and fal request ids, Rodin main-site
+shapes the flow depends on: fal request ids, Rodin main-site
 subscription keys, Tencent-style Hunyuan responses, and Meshy's preview then
 refine tasks.
 """
@@ -41,39 +41,25 @@ def _run(send, job, wait=100, pending=None):
 
 # -------------------------------------------------------------- provider choice
 
-def test_auto_prefers_premium_generators():
-    assert choose_provider("auto", ["hyper3d", "tripo"], {}) == ("tripo", True)
-    assert choose_provider("auto", ["hyper3d", "tripo", "meshy"], {}) == ("tripo", True)
-    assert choose_provider("auto", ["hyper3d", "meshy"], {}) == ("meshy", True)
-    assert choose_provider("auto", ["hunyuan3d", "hyper3d"], {}) == ("hyper3d", True)
-    assert choose_provider("auto", ["hunyuan3d"], {"hyper3d": True}) == ("hunyuan3d", True)
-
-
 def test_auto_falls_back_to_own_keys():
-    assert choose_provider("auto", [], {"tripo": False, "hunyuan3d": False, "hyper3d": True}) == ("hyper3d", False)
-    assert choose_provider("auto", [], {"tripo": True, "hunyuan3d": True, "hyper3d": True}) == ("hunyuan3d", False)
-    assert choose_provider("auto", [], {"tripo": True, "hunyuan3d": False, "hyper3d": False}) == ("tripo", False)
+    assert choose_provider("auto", {"tripo": False, "hunyuan3d": False, "hyper3d": True}) == "hyper3d"
+    assert choose_provider("auto", {"tripo": True, "hunyuan3d": True, "hyper3d": True}) == "hunyuan3d"
+    assert choose_provider("auto", {"tripo": True, "hunyuan3d": False, "hyper3d": False}) == "tripo"
 
 
 def test_nothing_enabled_points_at_setup():
     with pytest.raises(GenerationError, match="No 3D generator"):
-        choose_provider("auto", [], {"tripo": False, "hunyuan3d": False, "hyper3d": False})
+        choose_provider("auto", {"tripo": False, "hunyuan3d": False, "hyper3d": False})
 
 
 def test_tripo_own_key_when_enabled():
-    assert choose_provider("tripo", [], {"tripo": True}) == ("tripo", False)
-    assert choose_provider("auto", [], {"hunyuan3d": False, "hyper3d": False, "tripo": True, "meshy": True}) == (
-        "tripo", False)
+    assert choose_provider("tripo", {"tripo": True}) == "tripo"
+    assert choose_provider("auto", {"hunyuan3d": False, "hyper3d": False, "tripo": True, "meshy": True}) == "tripo"
 
 
-def test_tripo_needs_key_or_premium():
+def test_tripo_needs_a_key():
     with pytest.raises(GenerationError, match="Tripo"):
-        choose_provider("tripo", [], {"hunyuan3d": True, "tripo": False})
-
-
-def test_explicit_provider_must_be_on_in_premium():
-    with pytest.raises(GenerationError, match="not switched on"):
-        choose_provider("hyper3d", ["tripo"], {})
+        choose_provider("tripo", {"hunyuan3d": True, "tripo": False})
 
 
 # ------------------------------------------------------------------ flows
@@ -138,13 +124,12 @@ def test_tripo_switched_off_relays_the_addon_setup_steps(monkeypatch):
             return {"enabled": False}
 
     monkeypatch.setattr(server, "get_blender_connection", lambda: OffBlender())
-    monkeypatch.setattr(server, "_premium_generators", lambda _: [])
     reply = asyncio.run(server.generate_3d(None, prompt="a stool", provider="tripo", wait_seconds=10))
     assert reply == ("Error: Tripo integration is currently disabled. To enable it: 1. In the 3D Viewport, "
                      "find the MCP for Blender panel")
 
 
-def test_premium_error_codes_are_relayed_not_retried():
+def test_provider_error_codes_are_relayed_not_retried():
     send = FakeAddon({"create_tripo_job": {"code": "QUOTA_EXHAUSTED", "message": "You've used all generations."}})
     with pytest.raises(GenerationError, match="used all generations.*don't retry"):
         generation.submit(send, "tripo", "X", "x", None, None, None, True)
@@ -187,7 +172,7 @@ def test_rodin_main_site_uses_subscription_key_then_task_uuid():
     assert send.calls[-1] == ("import_generated_asset", {"task_uuid": "u1", "name": "Car"})
 
 
-def test_rodin_fal_and_premium_use_request_id():
+def test_rodin_fal_uses_request_id():
     send = FakeAddon({
         "create_rodin_job": {"request_id": "q1"},
         "poll_rodin_job_status": {"status": "COMPLETED"},
@@ -296,7 +281,7 @@ def test_repeating_an_unfinished_request_resumes_instead_of_paying_again(tmp_pat
                       "poll_tripo_job_status": {"status": "IN_PROGRESS"}})
     path = tmp_path / "pending.json"
     monkeypatch.setattr(server, "get_blender_connection", lambda: None)
-    monkeypatch.setattr(server, "_premium_generators", lambda _: ["tripo"])
+    monkeypatch.setattr(server, "_own_key_generators", lambda _: {"tripo": True})
     monkeypatch.setattr(server, "_addon_protocol", lambda: 13)
     monkeypatch.setattr(server, "_generation_send", send)
     monkeypatch.setattr(server, "_pending_generations", lambda: generation.Pending(path))
@@ -307,7 +292,7 @@ def test_repeating_an_unfinished_request_resumes_instead_of_paying_again(tmp_pat
             pass
 
     async def call(**kw):
-        return await server.generate_3d(Ctx(), image="/tmp/ref.png", quality="high", wait_seconds=10, **kw)
+        return await server.generate_3d(Ctx(), image="/tmp/ref.png", wait_seconds=10, **kw)
 
     monkeypatch.setattr(generation, "submit", lambda send_, *a, **k: Job("tripo", "rid", send_("create_tripo_job", {})["request_id"], "Ref"))
     first = asyncio.run(call())
@@ -466,7 +451,6 @@ def test_meshy_resent_request_resumes_across_restarts_without_paying_again(tmp_p
     send = _meshy(statuses)
     path = tmp_path / "pending.json"
     monkeypatch.setattr(server, "get_blender_connection", lambda: None)
-    monkeypatch.setattr(server, "_premium_generators", lambda _: [])
     monkeypatch.setattr(server, "_own_key_generators", lambda _: {"meshy": True})
     monkeypatch.setattr(server, "_generation_send", send)
     # A new Pending per call, as a restarted server would read the file.
@@ -567,29 +551,24 @@ def test_meshy_long_prompts_are_rejected_before_sending():
 
 
 def test_meshy_handles_name_a_meshy_task_kind():
-    for kind in ("t2p", "t2r", "i2m", "prm"):
+    for kind in ("t2p", "t2r", "i2m"):
         assert generation.Job.parse(f"meshy:{kind}:abc", "X") == Job("meshy", kind, "abc", "X")
     with pytest.raises(GenerationError):
         generation.Job.parse("meshy:task:abc", "X")
 
 
 def test_meshy_provider_choice():
-    assert choose_provider("meshy", [], {"meshy": True}) == ("meshy", False)
-    assert choose_provider("auto", [], {"hunyuan3d": False, "hyper3d": False, "meshy": True}) == ("meshy", False)
+    assert choose_provider("meshy", {"meshy": True}) == "meshy"
+    assert choose_provider("auto", {"hunyuan3d": False, "hyper3d": False, "meshy": True}) == "meshy"
     # Last in the own-key order: Sid decides where it belongs.
-    assert choose_provider("auto", [], {"hunyuan3d": True, "hyper3d": True, "meshy": True}) == ("hunyuan3d", False)
+    assert choose_provider("auto", {"hunyuan3d": True, "hyper3d": True, "meshy": True}) == "hunyuan3d"
     with pytest.raises(GenerationError, match="Meshy API key"):
-        choose_provider("meshy", [], {"meshy": False})
-    # Through Premium once it's ticked there; the user's own key isn't used then.
-    assert choose_provider("auto", ["hyper3d"], {"meshy": True}) == ("hyper3d", True)
-    assert choose_provider("meshy", ["hyper3d", "meshy"], {}) == ("meshy", True)
-    with pytest.raises(GenerationError, match="not switched on"):
-        choose_provider("meshy", ["hyper3d"], {})
+        choose_provider("meshy", {"meshy": False})
 
 
 def test_nothing_enabled_mentions_meshy():
     with pytest.raises(GenerationError, match="Meshy"):
-        choose_provider("auto", [], {"hunyuan3d": False, "hyper3d": False, "meshy": False})
+        choose_provider("auto", {"hunyuan3d": False, "hyper3d": False, "meshy": False})
 
 
 def test_meshy_key_never_crosses_the_mcp_side(tmp_path):
@@ -619,7 +598,7 @@ def test_meshy_is_an_own_key_generator_and_reported(monkeypatch):
     blender = _StatusBlender({"get_meshy_status"})
     assert server._own_key_generators(blender) == {
         "hunyuan3d": False, "hyper3d": False, "meshy": True, "tripo": False}
-    assert server._integrations(blender, [])["generators"]["meshy"] == "on"
+    assert server._integrations(blender)["generators"]["meshy"] == "on"
 
 
 def test_missing_meshy_commands_explain_the_setup(monkeypatch):
@@ -664,116 +643,6 @@ def test_other_generators_still_get_the_rescale_advice(monkeypatch):
     assert "Meshy" not in reply
 
 
-class _MeshyStatusBlender:
-    def __init__(self, message):
-        self.message = message
-
-    def send_command(self, command, params=None, **_kw):
-        if command == "get_meshy_status":
-            return {"enabled": False, "mode": "PREMIUM", "message": self.message}
-        return {"enabled": False}
-
-
-@pytest.mark.parametrize("premium", [[], ["hyper3d"]])
-def test_meshy_unticked_under_premium_relays_the_addon(monkeypatch, premium):
-    # With no Premium generator ticked the handshake lists none, so only the
-    # addon can say Premium is on and Meshy is off.
-    from blender_mcp import server
-
-    message = ("Meshy is turned off. To use it through Premium, check 'Meshy' in the MCP for Blender "
-               "sidebar (press N in the 3D Viewport).")
-    monkeypatch.setattr(server, "get_blender_connection", lambda: _MeshyStatusBlender(message))
-    monkeypatch.setattr(server, "_premium_generators", lambda _: premium)
-    monkeypatch.setattr(server, "_addon_protocol", lambda: 14)
-    reply = asyncio.run(server.generate_3d(None, prompt="a stool", provider="meshy", wait_seconds=10))
-    assert reply == f"Error: {message}"
-
-
-@pytest.mark.parametrize("premium", [[], ["hyper3d"]])
-def test_meshy_under_premium_with_an_older_addon_says_update(monkeypatch, premium):
-    from blender_mcp import server
-
-    old = ("Meshy runs on your own Meshy API key only and isn't available while Premium is the generation "
-           "source.")
-    monkeypatch.setattr(server, "get_blender_connection", lambda: _MeshyStatusBlender(old))
-    monkeypatch.setattr(server, "_premium_generators", lambda _: premium)
-    monkeypatch.setattr(server, "_addon_protocol", lambda: 13)
-    reply = asyncio.run(server.generate_3d(None, prompt="a stool", provider="meshy", wait_seconds=10))
-    assert "install-addon" in reply
-    assert "own Meshy API key only" not in reply
-
-
-# ------------------------------------------------------------ Meshy through Premium
-
-def _premium_meshy(statuses):
-    def poll(params):
-        assert params["kind"] == "prm"
-        queue = statuses[params["task_id"]]
-        reply = queue.pop(0) if len(queue) > 1 else queue[0]
-        return reply if isinstance(reply, dict) else {"status": reply}
-
-    return FakeAddon({
-        "create_meshy_job": {"task_id": "pj1", "kind": "prm", "message": "Premium (Pro): 40 left"},
-        "poll_meshy_job_status": poll,
-        "import_generated_asset_meshy": {"succeed": True},
-    })
-
-
-def test_meshy_premium_job_is_one_job_with_no_refine(tmp_path):
-    path = tmp_path / "pending.json"
-    send = _premium_meshy({"pj1": ["PENDING", "IN_PROGRESS", "SUCCEEDED"]})
-    job = generation.submit(send, "meshy", "Teapot", "a teapot", None, None, None, True)
-    assert job.handle == "meshy:prm:pj1"
-
-    assert _run(send, job, pending=generation.Pending(path)) == (True, "Teapot")
-    assert _count(send, "refine_meshy_job") == 0
-    assert send.calls[-1] == ("import_generated_asset_meshy", {"name": "Teapot", "task_id": "pj1"})
-
-
-def test_meshy_premium_job_resumes_from_its_handle():
-    send = _premium_meshy({"pj1": ["IN_PROGRESS"]})
-    job = generation.Job.parse("meshy:prm:pj1", "Teapot")
-    imported, detail = _run(send, job, wait=10)
-    assert imported is False
-    assert "IN_PROGRESS" in detail
-
-    send = _premium_meshy({"pj1": ["SUCCEEDED"]})
-    assert _run(send, generation.Job.parse("meshy:prm:pj1", "Teapot")) == (True, "Teapot")
-
-
-def test_meshy_premium_failure_is_relayed():
-    send = _premium_meshy({"pj1": [{"status": "FAILED", "error": "Meshy task failed. This attempt wasn't counted."}]})
-    with pytest.raises(GenerationError, match="This attempt wasn't counted"):
-        _run(send, generation.Job.parse("meshy:prm:pj1", "Teapot"))
-
-
-def test_meshy_premium_error_codes_are_relayed_not_retried():
-    send = FakeAddon({"create_meshy_job": {"code": "QUOTA_EXHAUSTED", "message": "You've used all generations."}})
-    with pytest.raises(GenerationError, match="QUOTA_EXHAUSTED"):
-        generation.submit(send, "meshy", "Teapot", "a teapot", None, None, None, True)
-    assert len(send.calls) == 1
-
-
-def test_meshy_premium_reply_keeps_its_real_world_scale(monkeypatch):
-    reply = _reply_for(monkeypatch, Job("meshy", "prm", "pj1", "Teapot"), _premium_meshy({"pj1": ["SUCCEEDED"]}))
-    assert "Meshy sized it to real-world height" in reply
-
-
-def test_meshy_premium_is_reported_as_premium():
-    from blender_mcp import server
-
-    blender = _StatusBlender(set())
-    assert server._integrations(blender, ["meshy"])["generators"]["meshy"] == "on (Premium)"
-    assert "get_meshy_status" not in blender.commands
-
-
-def test_premium_guidance_and_hint_name_meshy():
-    from blender_mcp.premium_hint import PREMIUM_HINT, premium_generation_guidance
-
-    assert "Meshy" in premium_generation_guidance(["meshy", "tripo"])
-    assert "Meshy" in PREMIUM_HINT
-
-
 def test_meshy_import_refreshes_the_viewport_app():
     from blender_mcp.openai_apps import SCENE_CHANGING_COMMANDS
 
@@ -791,18 +660,16 @@ def test_meshy_switched_off_relays_the_addon_setup_steps(monkeypatch):
             return {"enabled": False}
 
     monkeypatch.setattr(server, "get_blender_connection", lambda: OffBlender())
-    monkeypatch.setattr(server, "_premium_generators", lambda _: [])
     reply = asyncio.run(server.generate_3d(None, prompt="a stool", provider="meshy", wait_seconds=10))
     assert reply == ("Error: Meshy integration is currently disabled. To enable it: 1. In the 3D Viewport, "
                      "find the MCP for Blender panel")
 
 
-def _pose_call(monkeypatch, premium=(), own_keys=None, protocol=15, **kwargs):
+def _pose_call(monkeypatch, own_keys=None, protocol=15, **kwargs):
     from blender_mcp import server
 
     send = _meshy({"p1": ["IN_PROGRESS"]})
     monkeypatch.setattr(server, "get_blender_connection", lambda: None)
-    monkeypatch.setattr(server, "_premium_generators", lambda _: list(premium))
     monkeypatch.setattr(server, "_own_key_generators", lambda _: own_keys or {"hunyuan3d": True, "meshy": True})
     monkeypatch.setattr(server, "_generation_send", send)
     monkeypatch.setattr(server, "_pending_generations", lambda: generation.Pending(None))
@@ -829,12 +696,6 @@ def test_pose_mode_on_auto_picks_meshy_over_other_own_keys(monkeypatch):
 def test_pose_mode_rejects_bad_requests_before_generating(monkeypatch, kwargs, needle):
     reply, send = _pose_call(monkeypatch, **kwargs)
     assert needle in reply
-    assert send.calls == []
-
-
-def test_pose_mode_under_premium_says_own_key_only(monkeypatch):
-    reply, send = _pose_call(monkeypatch, premium=["meshy"], pose_mode="t-pose")
-    assert reply == f"Error: {generation.MESHY_POSE_NOT_IN_PREMIUM}"
     assert send.calls == []
 
 

@@ -32,7 +32,7 @@ HISTORY = {
     "25b16af": "Apr 2025: execute_code returns output",
     "aa592fa": "protocol 4: first with a version handshake",
     "f721eb5": "protocol 9: shipped up to 2.0.4",
-    "8b4e062": "protocol 11: Premium",
+    "8b4e062": "protocol 11",
     "current": "this checkout",
 }
 
@@ -40,8 +40,8 @@ HISTORY = {
 # answering all of them, or upgrading the addon breaks an older server.
 RELEASED_SERVER_COMMANDS = {
     "get_scene_info", "get_object_info", "get_viewport_screenshot", "execute_code", "describe_node_type",
-    "bpy_api_lookup", "get_addon_info", "get_telemetry_consent", "set_telemetry_consent",
-    "list_scene_items", "pick_viewport_object", "get_world_state_snapshot", "drain_human_activity",
+    "bpy_api_lookup", "get_addon_info",
+    "list_scene_items", "pick_viewport_object", "get_world_state_snapshot",
     "get_polyhaven_status", "get_polyhaven_categories", "search_polyhaven_assets",
     "get_polyhaven_asset_preview", "download_polyhaven_asset", "set_texture",
     "get_sketchfab_status", "search_sketchfab_models", "get_sketchfab_model_preview", "download_sketchfab_model",
@@ -146,7 +146,7 @@ class HistoricalAddon:
             return {"success": True, "width": 1, "height": 1}
         if command == "get_addon_info":
             return {"protocol_version": self.protocol, "addon_version": [1, 0], "capabilities": [],
-                    "blender_version": "4.2.0", "premium_generators": []}
+                    "blender_version": "4.2.0"}
         if command.startswith("get_") and command.endswith("_status"):
             return {"enabled": True, "message": "ready"}
         if command == "get_scene_info":

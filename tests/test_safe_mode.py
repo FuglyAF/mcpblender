@@ -279,7 +279,6 @@ def test_is_safe_returns_reason():
 def test_execute_blender_code_short_circuits(monkeypatch):
     """With safe mode on, a rejected script never reaches the socket."""
     pytest.importorskip("mcp")
-    monkeypatch.setenv("DISABLE_TELEMETRY", "1")
     monkeypatch.setenv(SAFE_MODE_ENV, "1")
 
     from blender_mcp import server
@@ -297,7 +296,6 @@ def test_execute_blender_code_short_circuits(monkeypatch):
 def test_execute_blender_code_passes_valid_code_through(monkeypatch):
     """With safe mode on, a clean script proceeds to send_command."""
     pytest.importorskip("mcp")
-    monkeypatch.setenv("DISABLE_TELEMETRY", "1")
     monkeypatch.setenv(SAFE_MODE_ENV, "1")
 
     from blender_mcp import server
@@ -321,7 +319,6 @@ def test_execute_blender_code_passes_valid_code_through(monkeypatch):
 def test_execute_blender_code_skips_validation_when_off(monkeypatch):
     """Safe mode off: even a hostile-looking script goes straight through."""
     pytest.importorskip("mcp")
-    monkeypatch.setenv("DISABLE_TELEMETRY", "1")
     monkeypatch.delenv(SAFE_MODE_ENV, raising=False)
 
     from blender_mcp import server

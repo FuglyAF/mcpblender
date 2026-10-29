@@ -5,11 +5,9 @@ generation is a single call: submit, poll until done or out of time, import.
 If time runs out the caller gets a job handle ("<provider>:<kind>:<id>") and
 passes it back to resume, so no client timeout ever strands a paid generation.
 
-The addon still does the provider work (and the Premium routing), through the
-commands it has always had, so this needs no addon update. Meshy is the
-exception: it is new, and on the user's own key its text generation is two
-paid tasks, a preview (mesh) and then a refine (texture), which this module
-chains and resumes. Through Premium, the Premium server runs both as one job.
+The addon still does the provider work, through the commands it has always
+had. Meshy text generation is two paid tasks, a preview (mesh) and then a refine
+(texture), which this module chains and resumes.
 """
 
 import asyncio
@@ -25,22 +23,16 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable
 from urllib.parse import urlparse
 
-from .premium_hint import PREMIUM_URL
-
 logger = logging.getLogger("BlenderMCPServer")
 
 PROVIDERS = ("tripo", "hunyuan3d", "hyper3d", "meshy")
 
-# Auto-pick order. Premium generators come first because the user is paying
-PREMIUM_ORDER = ("tripo", "meshy", "hyper3d", "hunyuan3d")
+# Auto-pick order.
 OWN_KEY_ORDER = ("hunyuan3d", "hyper3d", "tripo", "meshy")
 
 
-# Meshy task kinds: text preview, text refine, image to model, and a Premium
-# job (either input, preview and refine done by the Premium server).
-MESHY_KINDS = ("t2p", "t2r", "i2m", "prm")
-# Addons from this protocol on can run Meshy through Premium.
-MESHY_PREMIUM_PROTOCOL = 14
+# Meshy task kinds: text preview, text refine, image to model.
+MESHY_KINDS = ("t2p", "t2r", "i2m")
 # Addons from this protocol on pass pose_mode to Meshy.
 MESHY_POSE_PROTOCOL = 15
 # Meshy's pose_mode values; the model comes out in that pose, ready to rig.
@@ -53,25 +45,16 @@ POLL_INTERVAL_S = 5.0
 # the TypeScript SDK cut tool calls off at 60 s by default, and a reply that
 # never arrives takes its job handle with it while the generation is charged.
 MAX_CALL_S = 45.0
-# Unfinished jobs older than this are dropped from the pending file: the
-# Premium sweeper fails jobs after 60 minutes, and provider results expire.
+# Unfinished jobs older than this are dropped from the pending file: provider
+# results expire.
 PENDING_MAX_AGE_S = 2 * 3600
 
 TRIPO_UNAVAILABLE = ("Tripo is not enabled. In the MCP for Blender sidebar in Blender (press N in the 3D Viewport), "
-                     "tick Tripo under AI Model Generation and paste a Tripo API key, or use MCP for Blender Premium: "
-                     f"{PREMIUM_URL}?ref=mcp-tripo. If Premium is on, update the Blender addon: run "
-                     "`uvx mcp-for-blender install-addon`, then restart Blender.")
+                     "tick Tripo under AI Model Generation and paste a Tripo API key.")
 MESHY_UNAVAILABLE = ("Meshy is not enabled. In the MCP for Blender sidebar in Blender (press N in the 3D Viewport), "
                      "tick Meshy under AI Model Generation and paste a Meshy API key (needs a paid Meshy plan).")
-MESHY_PREMIUM_NEEDS_UPDATE = ("Meshy through MCP for Blender Premium needs the latest Blender addon: run "
-                              "`uvx mcp-for-blender install-addon`, then restart Blender and tick Meshy in the "
-                              "MCP for Blender sidebar.")
-MESHY_POSE_NEEDS_UPDATE = ("pose_mode needs the latest Blender addon: run `uvx mcp-for-blender install-addon`, "
+MESHY_POSE_NEEDS_UPDATE = ("pose_mode needs the latest Blender addon: run `mcp-for-blender install-addon`, "
                            "then restart Blender.")
-MESHY_POSE_NOT_IN_PREMIUM = ("pose_mode isn't available through MCP for Blender Premium yet, only on your own Meshy "
-                             "API key. Generate without pose_mode, or switch Generation Source to Your own API keys "
-                             "in the addon preferences.")
-
 Send = Callable[[str, dict], Any]
 Progress = Callable[[float, float], Awaitable[None]]
 
@@ -218,17 +201,12 @@ def default_name(prompt: str | None) -> str:
     return "".join(w.capitalize() for w in words) or "Generated"
 
 
-def choose_provider(requested: str, premium: list[str], own_key_enabled: dict[str, bool]) -> tuple[str, bool]:
-    """(provider, is_premium) for a request. `requested` is a provider or "auto"."""
+def choose_provider(requested: str, own_key_enabled: dict[str, bool]) -> str:
+    """The provider for a request. `requested` is a provider or "auto"."""
     requested = (requested or "auto").lower()
     if requested != "auto":
         if requested not in PROVIDERS:
             raise GenerationError(f"Unknown provider {requested!r}. Use one of: auto, {', '.join(PROVIDERS)}")
-        if premium:
-            if requested not in premium:
-                raise GenerationError(f"{requested} is not switched on in MCP for Blender Premium. "
-                                      f"On: {', '.join(premium)}. Tick it in the Blender sidebar.")
-            return requested, True
         if not own_key_enabled.get(requested):
             if requested == "meshy":
                 raise GenerationError(MESHY_UNAVAILABLE)
@@ -236,17 +214,13 @@ def choose_provider(requested: str, premium: list[str], own_key_enabled: dict[st
                 raise GenerationError(TRIPO_UNAVAILABLE)
             raise GenerationError(f"{requested} is not enabled. Turn it on and add an API key in the "
                                   "MCP for Blender sidebar in Blender (press N in the 3D Viewport).")
-        return requested, False
-    for name in PREMIUM_ORDER:
-        if name in premium:
-            return name, True
+        return requested
     for name in OWN_KEY_ORDER:
         if own_key_enabled.get(name):
-            return name, False
+            return name
     raise GenerationError(
         "No 3D generator is enabled. In Blender's MCP for Blender sidebar, turn on Hunyuan3D, Hyper3D "
-        "Rodin, Tripo or Meshy with an API key, or use MCP for Blender Premium (no keys needed): "
-        f"{PREMIUM_URL}?ref=mcp-no-generator"
+        "Rodin, Tripo or Meshy with an API key."
     )
 
 
@@ -347,9 +321,6 @@ def poll(send: Send, job: Job) -> tuple[str, Any]:
         if status == "SUCCEEDED":
             if job.kind == "t2p":
                 return "refine", None
-            if job.kind == "prm":
-                # The addon imports a Premium job by its id.
-                return "done", None
             if not result.get("model_url"):
                 return "failed", "finished without a model URL"
             return "done", result["model_url"]

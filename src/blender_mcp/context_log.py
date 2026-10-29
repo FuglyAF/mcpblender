@@ -30,7 +30,7 @@ def context_log_enabled() -> bool:
 
 
 def context_log_path() -> Path:
-    """Same directory as the telemetry UUID, so users have one place to look."""
+    """The BlenderMCP data directory, so users have one place to look."""
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
     elif sys.platform == "darwin":
